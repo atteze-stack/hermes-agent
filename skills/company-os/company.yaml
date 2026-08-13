@@ -1,0 +1,43 @@
+# company.yaml — declarative roster + routing for the JARVIS Company OS.
+#
+# THIS IS A STUB. Read company-os/README.md's "Design principles" before
+# adding anything here. In particular:
+#   - No new engine: whatever reads this file must translate it directly
+#     into existing Hermes calls (kanban_create, hermes profile, etc.) —
+#     it must not become a config surface for logic that doesn't exist yet.
+#   - Do NOT add approval / consensus / department / notification /
+#     calendar sections speculatively. Add them only in the same change
+#     that implements the skill/tool that actually reads and acts on them.
+#     An unused config section is a lie about what the system does.
+#   - Every fact below must be verifiable with a real Hermes command (see
+#     onboarding/NEW_EMPLOYEE_CHECKLIST.md) — this file records confirmed
+#     state, not aspiration.
+
+# employees: profile_name -> role description.
+# `profile` MUST match an actual Hermes profile name exactly (verify with
+# `hermes profile list`). `role` is free text for humans reading this file;
+# it is NOT read by any code yet (the actual routing decisions live in
+# `routing:` below and in the delegate-to-developer skill's judgment).
+employees:
+  secretary:
+    profile: secretary
+    role: "Receives requests (JARVIS/Telegram/Slack), decomposes them, and delegates execution to specialist profiles via kanban_create. Does not write code itself."
+  developer:
+    profile: developer
+    role: "Executes coding tasks (features, bugfixes, refactors, scripts) assigned via kanban_create by the secretary profile."
+  designer:
+    profile: designer
+    role: "Creates banners, marketing images, and UI mockups assigned via kanban_create by the secretary profile. Uses image_gen (gpt-image-2, via its own OPENAI_API_KEY)."
+
+# routing: keyword/topic -> employee key (from `employees:` above).
+# This is a hint for a HUMAN or for the secretary profile's own judgment —
+# there is currently no code that parses this file and auto-routes. Until
+# such a reader exists, `delegate-to-developer/SKILL.md` and
+# `delegate-to-designer/SKILL.md` are the actual routing logic secretary
+# follows (each hard-codes its own assignee for its domain). Keep this
+# table in sync with those skills' intent, not ahead of it.
+routing:
+  - match: "code"
+    assignee: developer
+  - match: "design/banner/이미지"
+    assignee: designer
