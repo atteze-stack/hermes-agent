@@ -1,30 +1,34 @@
 # Railway Ops
 
 Use this skill whenever the CEO asks (via Telegram or any channel) to do something
-to the `hermes-agent` Railway service: create a profile, check status/logs, restart,
-redeploy, sync data, or run a one-off command inside the running container.
+to the `hermes-agent` Railway service: check status/logs, restart, redeploy, or
+manage variables.
 
 ## Prerequisites (already set up, don't ask the user again)
 
-- `RAILWAY_TOKEN` is set in this profile's `.env` (a Railway **project** token, scoped
-  to the `respectful-vitality` project only).
+- `RAILWAY_TOKEN` is a Railway **project** token (scoped to the `respectful-vitality`
+  project only), set as a Railway service Variable — it's already in this
+  container's process environment, no `.env` edit needed.
 - Railway CLI is available via `npx --yes @railway/cli` (installs on first use if not
   already global). If `railway` is not on PATH, prefix commands with `npx --yes @railway/cli`.
 
-## Core pattern
+## Important: `railway ssh` is NOT available to you
 
-Run a command directly inside the live `hermes-agent` container:
+We tested this directly (2026-08-14): `railway ssh -s hermes-agent -- <command>`
+returns `Unauthorized` even with `RAILWAY_TOKEN` set and an SSH key registered to the
+CEO's account. Root cause: SSH auth is tied to a specific **logged-in user**, not a
+project token — a project token has no user identity for the SSH transport to
+authenticate as. The fix (a personal access token) would give you access to every
+project in the CEO's workspace, not just this one, so we're deliberately not doing
+that.
 
-```
-railway ssh -s hermes-agent -- <command>
-```
+**Practical result**: arbitrary shell exec inside the container (`ls`, `cat`, editing
+files, running one-off `hermes` commands) is a human-via-Railway-Console task, not
+something you can do. If the CEO asks you to do something that would require
+`railway ssh`, say so plainly and ask them to run it in the Console — don't attempt
+`railway ssh` yourself, it will just fail.
 
-- `-s hermes-agent` targets the correct service (there are two services in this
-  project: `hermes-agent` and the old, offline `atteze-agents` — never target the
-  latter, ever, for any reason).
-- Environment defaults to `production` (the only environment in this project).
-- Everything you could do in the Railway web Console, you can do here — `ls`, `cat`,
-  editing files, running `hermes profile create ...`, etc.
+Everything below this line uses commands that work fine with the project token.
 
 ## Risk tiers — this is the most important section
 
@@ -32,57 +36,35 @@ Every Railway action falls into exactly one tier. Follow the matching rule. Do n
 downgrade a tier because a task "seems small" — go by the action itself.
 
 ### Low risk — run immediately, no notice needed
-`hermes profile create`, `ls`/`cat`/`find` (read-only), `railway logs`, `railway status`,
-`railway ssh ... -- ps`, gateway/health checks, kanban status queries, listing variable
-**names** (`railway variables` without printing values).
+`railway status`, `railway logs`, listing variable **names** (`railway variables`
+without printing values), gateway/health checks, kanban status queries.
 
 ### Medium risk — notify, then run in the same message
-`hermes profile update` / config patches, skill sync / `git pull` inside the container,
-`hermes` version updates. Say what you're about to do and why, then do it — don't wait
-for a reply.
+Nothing currently maps here for Railway-CLI actions specifically (profile/config
+changes now happen via the Console, which is human-driven anyway). Kept as a tier
+for future non-ssh commands that fit this profile.
 
 ### High risk — show the exact command(s) you intend to run, then WAIT for an explicit
 yes/no from the CEO before executing. Do not proceed on silence or on an ambiguous reply.
 - `railway restart`, `railway redeploy`, any rollback
 - `railway variables set` (secret/env changes)
-- anything touching the volume: deleting/overwriting `kanban.db`, `auth.json`,
-  `profiles/*`, backups, restores
-- `rm` of anything under `/opt/data`
-- Docker/image rebuilds
-- the **first** deploy of any new profile or skill that hasn't run in production before
+- anything that would require `railway ssh` — flag it to the CEO instead of attempting it
 
 ## Secrets: write-only, never read
 
 You may run `railway variables set KEY=value` when the CEO gives you a value directly
 (that's still a High-risk action — gate it like any other). You must **never** run a
-command that prints a secret's value back (`railway variables get`, `cat .env`, `echo
-$TOKEN`, etc.) into any chat, log, or report. If you need to confirm a secret is set,
-confirm the **key exists**, never the value.
+command that prints a secret's value back (`railway variables get`, `echo $TOKEN`,
+etc.) into any chat, log, or report. If you need to confirm a secret is set, confirm
+the **key exists**, never the value.
 
 ## Data migration SOP (kanban.db and anything similar)
 
-Never copy-and-overwrite directly. Always:
-1. **Backup** — copy the current file to a timestamped `.bak` alongside it.
-2. **Checksum** — `sha256sum` the source.
-3. **Copy** — transfer the file.
-4. **Checksum** — `sha256sum` the destination, compare to step 2.
-5. **Switch** — only after checksums match, point the running service at the new file
-   (this step is itself High-risk if it requires a restart).
-
-This whole sequence is Medium risk (notify + proceed) up through step 4; step 5 (or any
-step that requires a restart) is High risk and needs approval.
+This requires `railway ssh` (file-level access inside the container), which you don't
+have — hand this off to the CEO/Console. If it ever becomes automatable, the SOP is:
+Backup → Checksum → Copy → Checksum → Switch, with the Switch step always High risk.
 
 ## Common tasks
-
-**Create a new profile:**
-```
-railway ssh -s hermes-agent -- hermes profile create <name> --clone-from default --description "<role description>"
-```
-
-**Check what profiles/files exist:**
-```
-railway ssh -s hermes-agent -- ls -la /opt/data/profiles
-```
 
 **Redeploy the latest build (no code change, just restart with current image) — High risk:**
 ```
@@ -100,6 +82,11 @@ railway restart -s hermes-agent
 **Check recent logs — Low risk:**
 ```
 railway logs -s hermes-agent
+```
+
+**Check deployment/service status — Low risk:**
+```
+railway status
 ```
 
 ## Hard rule
