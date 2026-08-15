@@ -172,19 +172,25 @@ task; do not paste this verbatim):
    `kanban_complete`'s `summary`/`metadata` so a human reading the board
    later can see it was proven, not asserted.
 
-**When to insert a human/reviewer checkpoint before "done":** for routine,
+**When to insert a reviewer checkpoint before "done":** for routine,
 low-risk work (new script, isolated test app, internal tool) the developer's
 own self-check above is enough — do not add process for its own sake. For
 anything that touches shared/production infrastructure, costs money, or is
 hard to undo (deploying to a real customer-facing service, changing DNS/
 firewall rules, rotating credentials), the developer worker should call
-`kanban_request_review` (with a `summary` of what was done and how it was
-verified) INSTEAD of `kanban_complete`, and only call `kanban_complete` after
-review is cleared. This uses the review lane Hermes already ships —
+`kanban_request_review(reviewer="review", summary="...")` INSTEAD of
+`kanban_complete`. `review` is the company-wide review department profile
+(2026-08-15) — a different model family from `developer` on purpose, and it
+keeps its code-execution tools so it actually runs/tests the change instead
+of eyeballing text. This uses the review lane Hermes already ships —
 `kanban_request_review` / `kanban_request_changes` — no new engine, no new
 agent. Say so explicitly in the task `body` when a task is risky enough to
 warrant this (e.g. "this touches the production NAS — request review before
-marking done").
+marking done"). `review` approves by creating a follow-on `kanban_create`
+task for the `release` profile (which alone holds production deploy
+credentials — see `조직도.md` §4) and completing its own task; it rejects
+via `kanban_request_changes`, which returns the task to `developer`
+automatically.
 
 4. Do NOT poll in a tight loop. If the requester needs to be notified on
    completion, that is handled by kanban's existing notify-subscription
