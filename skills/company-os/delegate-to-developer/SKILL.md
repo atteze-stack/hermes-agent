@@ -151,6 +151,41 @@ work that could have started immediately.
    when it's done." Do not claim the work is finished; it has only been
    queued.
 
+## "Done" means implemented → self-checked → deployed → confirmed running
+
+The `body` you write is the developer worker's entire briefing — always make
+"done" mean the FULL lifecycle, not just "code written". Bake this into the
+acceptance criteria of every `kanban_create` body (adapt the specifics to the
+task; do not paste this verbatim):
+
+1. **Implement** the change.
+2. **Self-check** before declaring done: run it, don't just read it. For a
+   service this means actually starting it and hitting the endpoint (curl,
+   etc.), not just "the code looks right" — this is what worked for the
+   2026-08-14 lotto-API task (built, deployed, curl-tested repeatedly, THEN
+   reported done with the evidence in `kanban_complete`'s `summary`).
+3. **Deploy** wherever the task specifies (a real server, a repo push, a
+   running process) — a task isn't done if the result only exists in a
+   scratch dir nobody can reach.
+4. **Confirm it's actually running** — re-check after deploy, not just after
+   local build. Include the verification evidence (command run + result) in
+   `kanban_complete`'s `summary`/`metadata` so a human reading the board
+   later can see it was proven, not asserted.
+
+**When to insert a human/reviewer checkpoint before "done":** for routine,
+low-risk work (new script, isolated test app, internal tool) the developer's
+own self-check above is enough — do not add process for its own sake. For
+anything that touches shared/production infrastructure, costs money, or is
+hard to undo (deploying to a real customer-facing service, changing DNS/
+firewall rules, rotating credentials), the developer worker should call
+`kanban_request_review` (with a `summary` of what was done and how it was
+verified) INSTEAD of `kanban_complete`, and only call `kanban_complete` after
+review is cleared. This uses the review lane Hermes already ships —
+`kanban_request_review` / `kanban_request_changes` — no new engine, no new
+agent. Say so explicitly in the task `body` when a task is risky enough to
+warrant this (e.g. "this touches the production NAS — request review before
+marking done").
+
 4. Do NOT poll in a tight loop. If the requester needs to be notified on
    completion, that is handled by kanban's existing notify-subscription
    mechanism (already wired into the gateway) — do not build a custom
@@ -190,9 +225,11 @@ kanban_create(
 - The developer profile must actually have credentials (`.env`) configured
   — if cloned via `--clone-from default`, it inherits the same API key as
   secretary, so this is already satisfied in this environment.
-- This skill only covers ONE-WAY delegation (secretary → developer). It
-  does not implement review/approval — see `company-os` roadmap below for
-  how that layers on top without a new engine.
+- This skill covers ONE-WAY delegation (secretary → developer); the
+  developer worker itself decides whether a given task's risk warrants the
+  `kanban_request_review` checkpoint above (see "'Done' means..."). Secretary
+  does not run a separate approval workflow on top — see `company-os`
+  roadmap below for anything beyond that.
 
 ## Relationship to the company.yaml roadmap
 
