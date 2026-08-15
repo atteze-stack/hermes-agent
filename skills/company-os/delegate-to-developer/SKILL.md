@@ -187,9 +187,12 @@ of eyeballing text. This uses the review lane Hermes already ships —
 agent. Say so explicitly in the task `body` when a task is risky enough to
 warrant this (e.g. "this touches the production NAS — request review before
 marking done"). `review` approves by creating a follow-on `kanban_create`
-task for the `release` profile (which alone holds production deploy
-credentials — see `조직도.md` §4) and completing its own task; it rejects
-via `kanban_request_changes`, which returns the task to `developer`
+task reassigned back to `developer` (there is no separate `release` profile
+— retired 2026-08-15, the CEO decided the implementer deploys their own
+work after review clears rather than isolating deploy credentials on a
+separate profile; see `조직도.md` §4 for the security trade-off this
+implies) and completing its own task; it rejects via
+`kanban_request_changes`, which returns the task to `developer`
 automatically.
 
 4. Do NOT poll in a tight loop. If the requester needs to be notified on
