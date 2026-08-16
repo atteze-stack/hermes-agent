@@ -89,7 +89,24 @@ railway logs -s hermes-agent
 railway status
 ```
 
-## Hard rule
+## `atteze-agents` (자비스) — rule updated 2026-08-16
 
-Never target the `atteze-agents` service (it's intentionally offline; redeploying
-it reintroduces the old Telegram bot and causes polling conflicts with this one).
+**History**: this section used to say "never target `atteze-agents` — it's
+intentionally offline." That was true 08-14~15 (the dead service kept getting
+revived by daily digest commits, causing Telegram polling conflicts). It is
+**no longer true**: the service was deliberately brought back online on
+2026-08-16 as the CEO's Telegram assistant (진행로그 08-15 §4-(14) 복구 계획).
+
+Current rules:
+- `atteze-agents` is a **live production service**. Status/log reads: Low risk,
+  fine anytime.
+- **Redeploys of `atteze-agents`**: allowed for the `developer` profile as the
+  final step of an approved jarvis kanban card — see the `jarvis-maintenance`
+  skill, which owns that procedure. Outside of an approved card, redeploying it
+  is High risk: show the command and wait for explicit CEO approval.
+- Its GitHub **auto-deploy stays OFF on purpose** (daily 06:00 digest commits
+  would redeploy it every day and risk Telegram 409s). Never re-enable it; code
+  reaches production via `railway redeploy` after a push.
+- A burst of Telegram 409 lines for 1–2 minutes right after a redeploy is
+  normal (old and new container overlap). **Sustained** 409s are an incident —
+  escalate with logs instead of retrying redeploys.
