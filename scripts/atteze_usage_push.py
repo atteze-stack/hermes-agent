@@ -106,12 +106,33 @@ def _read_db(name: str, path: str, since_ts: float) -> dict:
             log(f"  {name}: session_model_usage 테이블 없음 — 건너뜀")
             return days
         # 시각 컬럼 이름이 버전마다 다를 수 있어 있는 것을 골라 씁니다.
-        tcol = next((c for c in ("updated_at", "created_at", "ts", "timestamp")
+        # ⚠️ 2026-08-16 수정: 실제 스키마엔 updated_at/created_at/ts/timestamp가
+        # 전혀 없고 first_seen/last_seen만 존재해서(developer/secretary/designer
+        # state.db 로 확인) tcol 이 항상 None → 모든 행이 "오늘"로만 잡히는
+        # 버그가 있었다. last_seen(최근 활동 시각)을 최우선으로 추가.
+        tcol = next((c for c in ("last_seen", "updated_at", "created_at", "ts", "timestamp")
                      if c in cols), None)
         pick = [c for c in ("input_tokens", "output_tokens", "cache_read_tokens",
                             "cache_write_tokens", "reasoning_tokens") if c in cols]
-        costc = next((c for c in ("actual_cost_usd", "estimated_cost_usd")
-                      if c in cols), None)
+        # ⚠️ 2026-08-16 수정: actual_cost_usd 컬럼은 항상 존재하지만 이 배포에서는
+        # 전부 0.0 이고(실제 청구 반영 전), 실비용은 estimated_cost_usd 에 있다
+        # (developer 14건 합계 $20.11, secretary 20건 $12.84 확인됨).
+        # 예전 코드는 존재 여부만 보고 actual_cost_usd 를 무조건 우선해서
+        # cost_usd 가 항상 0으로 올라가는 버그가 있었다 — 값이 0이 아닌
+        # 컬럼을 우선한다(재계산이 아니라 "어느 컬럼을 쓸지"만 바꾼 것).
+        costc = None
+        for cand in ("actual_cost_usd", "estimated_cost_usd"):
+            if cand not in cols:
+                continue
+            nonzero = cur.execute(
+                f"SELECT COUNT(*) FROM session_model_usage WHERE {cand} > 0"
+            ).fetchone()[0]
+            if nonzero:
+                costc = cand
+                break
+        if costc is None:
+            costc = next((c for c in ("actual_cost_usd", "estimated_cost_usd")
+                          if c in cols), None)
         if not pick:
             log(f"  {name}: 토큰 컬럼 없음 — 건너뜀")
             return days
