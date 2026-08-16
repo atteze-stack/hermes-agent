@@ -39,8 +39,14 @@ class TestClarifyToolBasics:
 class TestClarifyToolChoicesValidation:
     """Tests for choices parameter validation."""
 
-    def test_choices_trimmed_to_max(self):
-        """Should trim choices to MAX_CHOICES."""
+    def test_choices_over_max_paginated_with_more_choices_label(self):
+        """>4 choices (single-select) paginate: 4 shown + a fixed 'see more' entry.
+
+        Rule #5 (2026-08-16 CEO-adopted format rules): when there are more
+        choices than fit on one page, the tool shows the first MAX_CHOICES
+        plus a fixed pagination entry instead of silently truncating, and
+        returns the overflow via ``more_choices`` in the JSON result.
+        """
         choices_passed = []
 
         def mock_callback(question: str, choices: Optional[List[str]]) -> str:
@@ -48,9 +54,29 @@ class TestClarifyToolChoicesValidation:
             return "picked"
 
         many_choices = ["a", "b", "c", "d", "e", "f", "g"]
-        clarify_tool("Pick one", choices=many_choices, callback=mock_callback)
+        result = json.loads(clarify_tool("Pick one", choices=many_choices, callback=mock_callback))
 
-        assert len(choices_passed) == MAX_CHOICES
+        # 4 real choices + 1 pagination entry shown to the callback/user.
+        assert len(choices_passed) == MAX_CHOICES + 1
+        assert choices_passed[:4] == ["a", "b", "c", "d"]
+        from tools.clarify_tool import MORE_CHOICES_LABEL
+        assert choices_passed[-1] == MORE_CHOICES_LABEL
+        # Overflow choices are handed back for a follow-up page.
+        assert result["more_choices"] == ["e", "f", "g"]
+
+    def test_choices_at_or_under_max_no_pagination_entry(self):
+        """<=4 choices: no 'see more' entry, no more_choices in the result."""
+        choices_passed = []
+
+        def mock_callback(question: str, choices: Optional[List[str]]) -> str:
+            choices_passed.extend(choices or [])
+            return "picked"
+
+        result = json.loads(clarify_tool(
+            "Pick one", choices=["a", "b", "c", "d"], callback=mock_callback
+        ))
+        assert choices_passed == ["a", "b", "c", "d"]
+        assert "more_choices" not in result
 
 
     def test_choices_converted_to_strings(self):
@@ -220,6 +246,83 @@ class TestClarifyToolMultiSelect:
             callback=mock_callback,
         )
         assert len(choices_passed) == MAX_CHOICES
+
+
+class TestClarifyChoiceFormatRules:
+    """Choice format rules adopted 2026-08-16 after a CEO complaint that long
+    choices were being cut off / hard to read on Slack: (1) never ask the
+    user to restate their request, (2) one line per choice, (3) <=30 chars
+    per choice line (detail goes in a follow-up message), (4) max 4 choices
+    per page + numeric-reply, (5) a 5th "다른 선택지 보기" pagination entry
+    when there are more than 4 real choices.
+    """
+
+    def test_multiline_choice_collapsed_to_one_line(self):
+        """Embedded newlines/whitespace in a choice must collapse to one line."""
+        seen = []
+
+        def cb(question, choices):
+            seen.extend(choices or [])
+            return choices[0]
+
+        clarify_tool(
+            "Pick",
+            choices=["Line one\nLine two", "Single"],
+            callback=cb,
+        )
+        assert all("\n" not in c for c in seen)
+        assert seen[0] == "Line one Line two"
+
+    def test_long_choice_truncated_to_30_chars(self):
+        """A choice longer than 30 chars is truncated with an ellipsis."""
+        from tools.clarify_tool import MAX_CHOICE_CHARS
+        seen = []
+
+        def cb(question, choices):
+            seen.extend(choices or [])
+            return choices[0]
+
+        long_choice = "This is a very long choice title that exceeds thirty characters easily"
+        clarify_tool("Pick", choices=[long_choice, "short"], callback=cb)
+        assert len(seen[0]) <= MAX_CHOICE_CHARS
+        assert seen[0].endswith("…")
+
+    def test_short_choice_left_untouched(self):
+        seen = []
+
+        def cb(question, choices):
+            seen.extend(choices or [])
+            return choices[0]
+
+        clarify_tool("Pick", choices=["WordPress"], callback=cb)
+        assert seen == ["WordPress"]
+
+    def test_pagination_label_is_fixed_constant(self):
+        from tools.clarify_tool import MORE_CHOICES_LABEL
+        assert MORE_CHOICES_LABEL == "다른 선택지 보기"
+
+    def test_more_choices_note_present_when_paginated(self):
+        def cb(question, choices):
+            return choices[-1]  # picks the pagination entry
+
+        result = json.loads(clarify_tool(
+            "Pick",
+            choices=["a", "b", "c", "d", "e"],
+            callback=cb,
+        ))
+        assert "more_choices_note" in result
+        assert result["user_response"] == "다른 선택지 보기"
+
+    def test_schema_forbids_reinput_and_documents_format_rules(self):
+        """The schema text itself must carry the no-reinput / format-rule
+        instructions so the calling LLM follows them without app-level
+        enforcement of choice wording (only length/lines are enforced in
+        code; the "don't ask user to restate" rule is a prompting contract).
+        """
+        desc = CLARIFY_SCHEMA["description"]
+        assert "restate" in desc.lower() or "re-explain" in desc.lower()
+        assert "one-line" in desc.lower() or "one line" in desc.lower()
+        assert "30 characters" in desc
 
 
 class TestInvokeCallbackDispatch:

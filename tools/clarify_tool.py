@@ -15,12 +15,44 @@ a thin dispatcher that delegates to a platform-provided callback.
 """
 
 import json
+import re
 from typing import List, Optional, Callable
 
 
-# Maximum number of predefined choices the agent can offer.
+# Maximum number of predefined choices shown on a single page/message.
 # A 5th "Other (type your answer)" option is always appended by the UI.
 MAX_CHOICES = 4
+
+# --- Choice response format rules (2026-08-16, CEO-adopted) ---------------
+# Adopted after the CEO reported choices being cut off / hard to read on
+# Slack ("선택지에 글이 길어서 짤리는데 정확하게 확인할 수가 없다"). Four rules,
+# all mandatory, apply everywhere the bot presents multiple choices:
+#   1. Never ask the user to re-state their original request just because the
+#      candidate choices feel ambiguous/incomplete — build the best possible
+#      choices from what's already known instead (this is a prompting/schema
+#      instruction, enforced via CLARIFY_SCHEMA's description below; there is
+#      deliberately no "please rephrase" style fallback anywhere in this
+#      module).
+#   2. Each choice renders as exactly ONE line (no embedded newlines).
+#   3. Each choice line is <=30 characters — short titles only; the detailed
+#      explanation is a SEPARATE follow-up message sent only after the user
+#      has picked by number (title first, detail after — never both at once).
+#   4. At most MAX_CHOICES real choices per page, with numeric-reply support
+#      (handled by tools/clarify_gateway.py's `_coerce_text_response`).
+# Rule 5 (below) is the additional risk-mitigation extension for the case
+# where more than MAX_CHOICES real choices are genuinely needed.
+MAX_CHOICE_CHARS = 30
+
+# Fixed label for the pagination "see more" entry (rule 5: >4 choices).
+# Reserved verbatim per the adopted plan — do not localize/rename casually;
+# platform adapters and the gateway's numeric-reply resolution match against
+# this exact choice text to detect "the user wants the next page".
+MORE_CHOICES_LABEL = "다른 선택지 보기"
+
+# Sane upper bound on how many *raw* choices a single clarify() call may
+# carry before they get paginated. Prevents a runaway/malformed tool call
+# from generating an unbounded number of pages; well above any real use case.
+MAX_TOTAL_CHOICES = 20
 
 
 def _flatten_choice(c) -> str:
@@ -54,6 +86,26 @@ def _flatten_choice(c) -> str:
     if isinstance(c, (list, tuple)):
         return " ".join(_flatten_choice(x) for x in c).strip()
     return str(c).strip()
+
+
+def _format_choice_line(text: str, max_chars: int = MAX_CHOICE_CHARS) -> str:
+    """Enforce the one-line + <=N-char choice format rules (#2 and #3).
+
+    First collapses any whitespace/newlines into single spaces (a choice
+    must always render as exactly one line — rule #2), then truncates to
+    ``max_chars`` with a trailing ellipsis if still too long (rule #3).
+
+    This is a defensive backstop, not the primary mechanism: CLARIFY_SCHEMA
+    instructs the calling LLM to already write short one-line titles and put
+    detail in a follow-up message. But a caller that ignores the instruction
+    should still get a readable, single-line, bounded-width choice instead
+    of the original complaint (a choice long enough to get cut off / wrap
+    unreadably on a narrow chat surface like Slack).
+    """
+    line = re.sub(r"\s+", " ", text).strip()
+    if len(line) > max_chars:
+        line = line[: max_chars - 1].rstrip() + "…"
+    return line
 
 
 def _invoke_callback(callback, question, choices, multi_select):
@@ -120,12 +172,21 @@ def clarify_tool(
 
     Args:
         question:     The question text to present.
-        choices:      Up to 4 predefined answer choices. When omitted the
-                      question is purely open-ended.
+        choices:      Predefined answer choices (up to MAX_TOTAL_CHOICES).
+                      Each is normalised to one line, <=30 chars (rules #2/#3).
+                      When there are more than MAX_CHOICES (4) of them and
+                      multi_select is False, only the first MAX_CHOICES are
+                      shown on this page plus a fixed "다른 선택지 보기" entry
+                      (rule #5); the remaining choices are returned in the
+                      output's ``more_choices`` field so the caller can issue
+                      a follow-up clarify() call for the next page. When
+                      omitted the question is purely open-ended.
         multi_select: When True, the user can select multiple choices
                       (checkboxes).  The ``user_response`` in the output JSON
                       will be a list of strings instead of a single string.
-                      Has no effect when ``choices`` is omitted.
+                      Has no effect when ``choices`` is omitted. Pagination
+                      (rule #5) is not applied in multi-select mode — choices
+                      are simply capped at MAX_CHOICES as before.
         callback:     Platform-provided function that handles the actual UI
                       interaction.  Signature:
                       ``callback(question, choices, multi_select=False) -> str``.
@@ -141,7 +202,8 @@ def clarify_tool(
 
     question = question.strip()
 
-    # Validate and trim choices
+    # Validate, flatten, and format choices
+    more_choices: List[str] = []
     if choices is not None:
         if not isinstance(choices, list):
             return tool_error("choices must be a list of strings.")
@@ -151,8 +213,26 @@ def clarify_tool(
         # so the CLI panel, Discord buttons, and Telegram list all render clean
         # text and the resolved answer is never a raw Python dict repr.
         choices = [s for s in (_flatten_choice(c) for c in choices) if s]
-        if len(choices) > MAX_CHOICES:
-            choices = choices[:MAX_CHOICES]
+        # Rules #2/#3: one line, <=30 chars per choice.
+        choices = [s for s in (_format_choice_line(c) for c in choices) if s]
+        if len(choices) > MAX_TOTAL_CHOICES:
+            choices = choices[:MAX_TOTAL_CHOICES]
+
+        if multi_select:
+            # Pagination (rule #5) is scoped to single-select flows only —
+            # multi-select "want more AND already picked some" has no clean
+            # resolution in tools/clarify_gateway.py's selection coercion, so
+            # keep the simple pre-existing behavior: cap and show as one page.
+            if len(choices) > MAX_CHOICES:
+                choices = choices[:MAX_CHOICES]
+        elif len(choices) > MAX_CHOICES:
+            # Rule #5: show the top MAX_CHOICES, fix a "see more" entry in
+            # the next slot, and hand the rest back to the caller so it can
+            # issue a follow-up clarify() call in the same 1-line/30-char/
+            # numbered format if the user picks it.
+            more_choices = choices[MAX_CHOICES:]
+            choices = choices[:MAX_CHOICES] + [MORE_CHOICES_LABEL]
+
         if not choices:
             choices = None  # empty list → open-ended
 
@@ -169,11 +249,20 @@ def clarify_tool(
     else:
         user_response = str(raw_response).strip()
 
-    return json.dumps({
+    result = {
         "question": question,
         "choices_offered": choices,
         "user_response": user_response,
-    }, ensure_ascii=False)
+    }
+    if more_choices:
+        result["more_choices"] = more_choices
+        result["more_choices_note"] = (
+            f"{len(more_choices)} more choice(s) were not shown on this page. "
+            f"If user_response is \"{MORE_CHOICES_LABEL}\", call clarify() again "
+            "with these as `choices` to show the next page in the same "
+            "1-line/<=30-char/numbered format."
+        )
+    return json.dumps(result, ensure_ascii=False)
 
 
 def check_clarify_requirements() -> bool:
@@ -190,8 +279,8 @@ CLARIFY_SCHEMA = {
     "description": (
         "Ask the user a question when you need clarification, feedback, or a "
         "decision before proceeding. Supports three modes:\n\n"
-        "1. **Single-select multiple choice** — provide up to 4 choices. The user picks one "
-        "or types their own answer via a 5th 'Other' option.\n"
+        "1. **Single-select multiple choice** — provide choices (ideally up to 4). The user picks one "
+        "or types their own answer via a final 'Other' option.\n"
         "2. **Multi-select multiple choice** — set multi_select=true. The user can select "
         "multiple options via checkboxes. user_response will be a list of selected choices.\n"
         "3. **Open-ended** — omit choices entirely. The user types a free-form "
@@ -202,6 +291,18 @@ CLARIFY_SCHEMA = {
         "into the question string render as dead prose the user can't pick. "
         "Right: question='Which deployment target?', choices=['staging', "
         "'prod']. Wrong: question='Which target? 1) staging 2) prod', choices=[].\n\n"
+        "CHOICE FORMAT RULES (mandatory, apply to every choice you write):\n"
+        "- Never ask the user to restate or re-explain their original request just "
+        "because your candidate choices feel ambiguous or incomplete — build the "
+        "best possible choices from what you already know and offer THOSE.\n"
+        "- Each choice is a short, ONE-LINE title only (no line breaks). Keep it to "
+        "roughly 30 characters or less — put any longer explanation in a separate "
+        "follow-up message you send AFTER the user picks by number, never both at "
+        "once. Order: short title → user picks by number → detailed explanation.\n"
+        "- If you have more than 4 real options, pass them all anyway (up to 20) — "
+        "the tool automatically shows the first 4 plus a 'see more' entry, and "
+        "returns the rest in `more_choices` for you to offer as a follow-up "
+        "clarify() call in the same format if the user asks for more.\n\n"
         "Use this tool when:\n"
         "- The task is ambiguous and you need the user to choose an approach\n"
         "- You want post-task feedback ('How did that work out?')\n"
@@ -225,12 +326,16 @@ CLARIFY_SCHEMA = {
             "choices": {
                 "type": "array",
                 "items": {"type": "string"},
-                "maxItems": MAX_CHOICES,
+                "maxItems": MAX_TOTAL_CHOICES,
                 "description": (
                     "REQUIRED whenever you are presenting selectable options: "
-                    "each distinct option is its own array element (up to 4). "
-                    "The UI renders these as pickable rows and auto-appends an "
-                    "'Other (type your answer)' option. Omit this parameter "
+                    "each distinct option is its own array element, as a short "
+                    "ONE-LINE title (<=30 chars — put detail in a follow-up "
+                    "message instead). Up to 4 are shown per page; if you pass "
+                    "more (up to 20), the tool paginates automatically with a "
+                    "'see more' entry and returns the overflow in "
+                    "`more_choices` for a follow-up call. The UI auto-appends "
+                    "an 'Other (type your answer)' option. Omit this parameter "
                     "entirely ONLY for a genuinely open-ended free-text question."
                 ),
             },
